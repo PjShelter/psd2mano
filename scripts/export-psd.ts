@@ -27,6 +27,14 @@ interface ExportContext {
   progress: ProgressTracker;
 }
 
+interface CharacterLayerEntry {
+  id: string;
+  group: string;
+  name: string;
+  order: number;
+  path: string;
+}
+
 class SimpleImageData {
   width: number;
   height: number;
@@ -153,6 +161,7 @@ async function main(): Promise<void> {
   try {
     await exportComposite(psd, context);
     await exportLayers(psd.children ?? [], textureDir, context);
+    await exportModel(psd, context);
     progress.finish();
   } finally {
     await fs.rm(tempRoot, { recursive: true, force: true });
@@ -404,6 +413,30 @@ async function exportLayers(
   }
 }
 
+async function exportModel(psd: Psd, context: ExportContext): Promise<void> {
+  const modelPath = path.join(context.options.outputDir, 'model.char.json');
+  const model = {
+    version: '1.0.0',
+    metadata: {
+      name: getBaseName(context.options.inputPath),
+      exportedAt: new Date().toISOString(),
+    },
+    settings: {
+      basePath: './',
+    },
+    assets: {
+      layers: buildModelLayers(psd.children ?? [], getModelFormat(context.options.formats)),
+    },
+    controller: {
+      baseLayers: [],
+      defaultPoses: [],
+      poses: {},
+    },
+  };
+
+  await fs.writeFile(modelPath, `${JSON.stringify(model, null, 2)}\n`, 'utf8');
+}
+
 async function writePixelData(
   pixelData: PixelData,
   outputPath: string,
@@ -482,6 +515,54 @@ function toFullCanvasPixelData(
     height: canvasHeight,
     data: output,
   };
+}
+
+function buildModelLayers(layers: Layer[], format: OutputFormat): CharacterLayerEntry[] {
+  const entries: CharacterLayerEntry[] = [];
+  const orderRef = { value: 1 };
+  collectModelLayers(layers, '', format, entries, orderRef);
+  return entries;
+}
+
+function collectModelLayers(
+  layers: Layer[],
+  parentGroup: string,
+  format: OutputFormat,
+  entries: CharacterLayerEntry[],
+  orderRef: { value: number },
+): void {
+  const seenNames = new Map<string, number>();
+
+  for (const layer of layers) {
+    const safeName = uniquifyName(sanitizeFileName(layer.name?.trim() || 'layer'), seenNames);
+    const id = parentGroup ? `${parentGroup}/${safeName}` : safeName;
+
+    if (layer.children?.length) {
+      collectModelLayers(layer.children, id, format, entries, orderRef);
+      continue;
+    }
+
+    if (!layer.imageData) {
+      continue;
+    }
+
+    entries.push({
+      id,
+      group: parentGroup,
+      name: safeName,
+      order: orderRef.value,
+      path: normalizeModelPath(path.join('texture', `${id}.${format}`)),
+    });
+    orderRef.value += 1;
+  }
+}
+
+function getModelFormat(formats: OutputFormat[]): OutputFormat {
+  return formats.includes('png') ? 'png' : formats[0];
+}
+
+function normalizeModelPath(filePath: string): string {
+  return filePath.split(path.sep).join('/');
 }
 
 function countExportTasks(psd: Psd, formatCount: number): number {
